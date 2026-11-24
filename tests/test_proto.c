@@ -270,6 +270,7 @@ static void test_fuzz(void)
         size_t len = xs() % 1501;
         for (size_t k = 0; k < len; k++)
             buf[k] = (uint8_t)xs();
+        /* cppcheck-suppress uninitvar ; fuzz_check reads only buf[0..len), filled just above */
         fuzz_check(buf, len, &accepted);
     }
 

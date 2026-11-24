@@ -91,7 +91,7 @@ static void test_unknown_member(void)
 static void test_ordering_boundaries(void)
 {
     static node_t n;
-    member_t *m = seed(&n, STATE_ALIVE, 1, 999);
+    const member_t *m = seed(&n, STATE_ALIVE, 1, 999);
 
     member_t e = mk(4, STATE_ALIVE, 2, 0); /* (2,0) > (1,999) */
     CHECK(mem_upsert(&n, &e, 500) == MEM_UPDATED);
@@ -123,7 +123,7 @@ static void test_ordering_boundaries(void)
 static void test_late_message_does_not_revive(void)
 {
     static node_t n;
-    member_t *m = seed(&n, STATE_DEAD, 1, 37);
+    const member_t *m = seed(&n, STATE_DEAD, 1, 37);
 
     member_t e = mk(4, STATE_ALIVE, 1, 40); /* delayed heartbeat of the same incarnation */
     CHECK(mem_upsert(&n, &e, 900) == MEM_IGNORED);
@@ -163,7 +163,7 @@ static void test_restart_revives(void)
 static void test_suspect_recovery(void)
 {
     static node_t n;
-    member_t *m = seed(&n, STATE_SUSPECT, 1, 10);
+    const member_t *m = seed(&n, STATE_SUSPECT, 1, 10);
 
     member_t e = mk(4, STATE_ALIVE, 1, 10); /* no progress: stays suspected */
     CHECK(mem_upsert(&n, &e, 800) == MEM_IGNORED);
@@ -181,7 +181,7 @@ static void test_remote_opinion_not_adopted(void)
     static node_t n;
     static const uint8_t remote[] = {STATE_SUSPECT, STATE_DEAD};
     for (size_t i = 0; i < sizeof remote; i++) {
-        member_t *m = seed(&n, STATE_ALIVE, 1, 10);
+        const member_t *m = seed(&n, STATE_ALIVE, 1, 10);
         member_t e = mk(4, remote[i], 1, 12); /* progress is adopted, the verdict is not */
         CHECK(mem_upsert(&n, &e, 300) == MEM_UPDATED);
         CHECK(m->state == STATE_ALIVE);
@@ -198,7 +198,7 @@ static void test_remote_opinion_not_adopted(void)
 static void test_left_is_terminal(void)
 {
     static node_t n;
-    member_t *m = seed(&n, STATE_LEFT, 1, 10);
+    const member_t *m = seed(&n, STATE_LEFT, 1, 10);
 
     member_t e = mk(4, STATE_ALIVE, 1, 20); /* same incarnation, higher heartbeat */
     CHECK(mem_upsert(&n, &e, 400) == MEM_IGNORED);
@@ -219,7 +219,7 @@ static void test_left_from_owner(void)
     static node_t n;
 
     /* Rule 4: same incarnation, LEFT, whatever the heartbeat. */
-    member_t *m = seed(&n, STATE_ALIVE, 1, 10);
+    const member_t *m = seed(&n, STATE_ALIVE, 1, 10);
     member_t e = mk(4, STATE_LEFT, 1, 5);
     CHECK(mem_upsert(&n, &e, 450) == MEM_LEFT);
     CHECK(m->state == STATE_LEFT);
