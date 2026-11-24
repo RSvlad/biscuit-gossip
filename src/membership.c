@@ -85,20 +85,82 @@ void mem_remove(node_t *n, uint32_t id)
         remove_at(n, i);
 }
 
-/* STUB until #7: the full merge rule replaces this. */
+/* Time since the last progress, guarded against a clock that appears to go back. */
+static uint64_t silence_since(const member_t *m, uint64_t now_ms)
+{
+    return now_ms >= m->last_update_ms ? now_ms - m->last_update_ms : 0;
+}
+
+/* Lexicographic order: incarnation first, then heartbeat (spec 7.2). */
+static bool is_newer(const member_t *e, const member_t *m)
+{
+    return e->incarnation > m->incarnation ||
+           (e->incarnation == m->incarnation && e->heartbeat > m->heartbeat);
+}
+
+/*
+ * Merge rule, D3 (e = received record, m = our record).  Only *progress* is
+ * adopted from the network, never the remote opinion about liveness: SUSPECT
+ * is a purely local judgement and DEAD revives only with a new incarnation.
+ * Every state change goes through mem_log_transition (D18).
+ */
 int mem_upsert(node_t *n, const member_t *e, uint64_t now_ms)
 {
-    if (e->node_id == n->self.node_id || mem_find(n, e->node_id) != NULL)
+    /* 1. Records about ourselves: "I decide about myself". */
+    if (e->node_id == n->self.node_id)
         return MEM_IGNORED;
 
-    member_t m = *e;
-    if (m.state != STATE_DEAD && m.state != STATE_LEFT)
-        m.state = STATE_ALIVE;
-    m.last_update_ms = now_ms;
-    if (mem_insert(n, &m) != 0)
-        return MEM_REJECTED;
-    mem_log_transition(&m, "NEW", state_name(m.state), 0);
-    return MEM_ADDED;
+    member_t *m = mem_find(n, e->node_id);
+
+    /* 2. Unknown member: insert; DEAD/LEFT are kept as tombstones, the rest is ALIVE. */
+    if (m == NULL) {
+        member_t rec = *e;
+        rec.state = (e->state == STATE_DEAD || e->state == STATE_LEFT) ? e->state : STATE_ALIVE;
+        rec.last_update_ms = now_ms;
+        if (mem_insert(n, &rec) != 0)
+            return MEM_REJECTED;
+        mem_log_transition(&rec, "NEW", state_name(rec.state), 0);
+        return MEM_ADDED;
+    }
+
+    if (is_newer(e, m)) {
+        /*
+         * 3a. DEAD/LEFT are terminal within one incarnation: a late heartbeat must not revive.
+         * The one exception is the owner's own LEFT over our DEAD (note 3 of #7: LEFT is true
+         * whatever the heartbeat), so the outcome does not depend on the heartbeat value.
+         */
+        if ((m->state == STATE_DEAD || m->state == STATE_LEFT) &&
+            e->incarnation == m->incarnation &&
+            !(m->state == STATE_DEAD && e->state == STATE_LEFT))
+            return MEM_IGNORED;
+
+        /* 3b. New evidence of life: adopt the progress (and a possibly new address). */
+        uint8_t old_state = m->state;
+        uint64_t silence = silence_since(m, now_ms);
+        m->incarnation = e->incarnation;
+        m->heartbeat = e->heartbeat;
+        m->role = e->role;
+        m->ip = e->ip;
+        m->port = e->port;
+        m->state = e->state == STATE_LEFT ? STATE_LEFT : STATE_ALIVE;
+        m->last_update_ms = now_ms;
+        if (old_state != m->state)
+            mem_log_transition(m, state_name(old_state), state_name(m->state), silence);
+        return m->state == STATE_LEFT ? MEM_LEFT : MEM_UPDATED;
+    }
+
+    /* 4. Same incarnation, the owner says LEFT: true whatever the heartbeat (only the owner creates it). */
+    if (e->incarnation == m->incarnation && e->state == STATE_LEFT && m->state != STATE_LEFT) {
+        uint8_t old_state = m->state;
+        uint64_t silence = silence_since(m, now_ms);
+        m->state = STATE_LEFT;
+        m->last_update_ms = now_ms; /* D4: the cleanup timer starts now */
+        mem_log_transition(m, state_name(old_state), "LEFT", silence);
+        return MEM_LEFT;
+    }
+
+    /* 5. Older or identical information: nothing changes, last_update_ms stays. */
+    return MEM_IGNORED;
 }
 
 /*
