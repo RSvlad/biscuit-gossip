@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.cc }} / ${{ matrix.mode }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+        mode: [release, debug]
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang
+      - name: Build and test (release)
+        if: matrix.mode == 'release'
+        run: |
+          make
+          make test
+      - name: Build and test (debug, ASan + UBSan)
+        if: matrix.mode == 'debug'
+        run: |
+          make debug
+          make test SAN=1
