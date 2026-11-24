@@ -1,12 +1,22 @@
 name: ci
 
+# Required checks for main (Settings -> Branches, set by the repo owner):
+#   "gcc / release", "gcc / debug", "clang / release", "clang / debug",
+#   "lint", "cppcheck", "valgrind".
+# The integration job is nightly / manual only: timing-sensitive scenarios on shared
+# runners can be flaky, so it is not a merge gate.
+
 on:
   push:
   pull_request:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
 
 jobs:
   build:
     name: ${{ matrix.cc }} / ${{ matrix.mode }}
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -31,3 +41,53 @@ jobs:
         run: |
           make debug
           make test SAN=1
+
+  lint:
+    name: lint
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make lint
+
+  cppcheck:
+    name: cppcheck
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cppcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cppcheck
+      - run: make cppcheck
+
+  valgrind:
+    name: valgrind
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential valgrind
+      - run: make valgrind
+
+  integration:
+    name: integration (nightly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential
+      - name: Scenarios S1-S8
+        run: |
+          make
+          make itest
+      - name: Scenarios against the ASan/UBSan binary
+        run: make itest-san

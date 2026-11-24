@@ -2,6 +2,7 @@
 build/
 /biscuitd
 /biscuitd-debug
+/biscuitd-vg
 *.o
 *.d
 *.a
