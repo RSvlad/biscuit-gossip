@@ -62,11 +62,7 @@ static void install_signals(void)
 int node_init(node_t *n, const config_t *cfg, uint32_t id, uint8_t role)
 {
     char ip[INET_ADDRSTRLEN];
-    struct sockaddr_in bound;
-    socklen_t bound_len = sizeof bound;
-    member_t self;
     uint16_t port;
-    uint64_t now;
 
     if (n == NULL || cfg == NULL) {
         return -1;
@@ -96,6 +92,8 @@ int node_init(node_t *n, const config_t *cfg, uint32_t id, uint8_t role)
     }
 
     if (port == 0) { /* ephemeral port (tests): learn what the kernel gave us */
+        struct sockaddr_in bound;
+        socklen_t bound_len = sizeof bound;
         if (getsockname(n->fd, (struct sockaddr *)&bound, &bound_len) != 0) {
             LOG_E("getsockname failed: %s", strerror(errno));
             net_close(n->fd);
@@ -106,8 +104,9 @@ int node_init(node_t *n, const config_t *cfg, uint32_t id, uint8_t role)
         port = ntohs(bound.sin_port);
     }
 
-    now = now_ms();
+    uint64_t now = now_ms();
 
+    member_t self;
     memset(&self, 0, sizeof self);
     self.node_id = id;
     self.ip = cfg->bind_addr.sin_addr;
@@ -256,7 +255,6 @@ static void drain_socket(node_t *n)
 
     for (int i = 0; i < MAX_DGRAMS_PER_ITER; i++) {
         ssize_t len = net_recv(n->fd, buf, sizeof buf, &from);
-        int rc;
 
         if (len < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
@@ -280,7 +278,7 @@ static void drain_socket(node_t *n)
             continue;
         }
 
-        rc = proto_decode(buf, (size_t)len, &msg);
+        int rc = proto_decode(buf, (size_t)len, &msg);
         if (rc != PROTO_OK) {
             n->stats.dropped_malformed++;
             LOG_D("dropped malformed datagram from %s:%u (%zd bytes): %s", from_ip,
@@ -395,6 +393,12 @@ void node_run(node_t *n)
     fds[1].revents = 0;
 
     while (n->running) {
+        if (g_stop_requested) {
+            n->leaving = true;
+            n->running = false;
+            break;
+        }
+
         uint64_t now = now_ms();
         int timeout = ms_until_next_timer(n, now);
         int ready = poll(fds, 2, timeout);
