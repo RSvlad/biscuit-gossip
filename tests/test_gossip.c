@@ -713,7 +713,7 @@ static void test_three_nodes_converge(void)
         for (uint32_t id = 1; id <= 3; id++) {
             if (id == ns[i].self.node_id)
                 continue;
-            member_t *peer = mem_find(&ns[i], id);
+            const member_t *peer = mem_find(&ns[i], id);
             CHECK(peer != NULL);
             if (peer != NULL)
                 CHECK(peer->state == STATE_ALIVE);
