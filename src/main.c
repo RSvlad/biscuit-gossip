@@ -93,5 +93,5 @@ int main(int argc, char **argv)
 
     node_run(&node);
     node_shutdown(&node);
-    return 0;
+    return node.exit_code; /* 0, or 3 when the seed never answered (D17, #9) */
 }

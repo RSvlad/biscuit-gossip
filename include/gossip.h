@@ -41,24 +41,30 @@ void gossip_round(node_t *n);
  */
 void gossip_on_message(node_t *n, const msg_t *m, const struct sockaddr_in *from);
 
-/* ---- JOIN (#9, spec 7.4): declared by #8, implemented in #9 -------------------- */
+/* ---- JOIN (#9, spec 7.4, F2, D2, D17) ---------------------------------------------- */
 
 /*
- * Sends one MSG_JOIN (a single record: self) to cfg.seed_addr and counts it in
- * n->join_tries.  Does nothing without a seed.
+ * Sends one MSG_JOIN (a single record: self) to cfg.seed_addr, counts it in
+ * n->join_tries and logs "join attempt i/JOIN_MAX_TRIES to ip:port".  Does nothing without
+ * a seed.  The seed is not written into the table (D2: its id is unknown).
  */
 void gossip_join(node_t *n);
 
 /*
- * Join retry timer, called from node_run when now >= n->next_join_at: while
- * cfg.has_seed && !n->joined, sends gossip_join() every JOIN_RETRY_MS up to
- * JOIN_MAX_TRIES times, then gives up (exit code 3, D17).
+ * Join retry timer, called from node_run while cfg.has_seed && !n->joined and
+ * now >= n->next_join_at: sends gossip_join() and sets next_join_at = now +
+ * JOIN_RETRY_MS.  On the tick after the JOIN_MAX_TRIES-th attempt it logs
+ * "seed unreachable" (ERROR), sets exit_code = 3 and running = false; no
+ * exit() and no LEAVE (D17).
  */
 void gossip_tick_join(node_t *n, uint64_t now_ms);
 
 /*
- * The seed's side: a MSG_JOIN arrived.  Adds the joiner (mem_upsert) and answers
- * MSG_GOSSIP_REPLY with a fresh sample to `from` (D6).
+ * The seed's side: a MSG_JOIN arrived (exactly one record, otherwise ignored).
+ * Adds the joiner (mem_upsert; "discovered member" on MEM_ADDED) and always
+ * answers MSG_GOSSIP_REPLY with a fresh sample to `from` (D6), also after
+ * MEM_IGNORED/MEM_REJECTED.  The same id at another address without a newer
+ * incarnation logs "id conflict" (WARN); not fatal.
  */
 void gossip_handle_join(node_t *n, const msg_t *m, const struct sockaddr_in *from);
 
