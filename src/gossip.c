@@ -39,8 +39,11 @@ static bool from_seed(const node_t *n, const struct sockaddr_in *from)
 
 /*
  * Merges every record of m into the table (spec 7.2 lives in mem_upsert).
- * MEM_ADDED is logged here; the state transitions and MEM_REJECTED are
- * already logged by mem_* (D18), so nothing is duplicated.
+ * MEM_ADDED is logged here as "discovered member" (required by #8); it adds
+ * the address and deliberately sits next to the "NEW -> ALIVE" line that
+ * mem_upsert logs through mem_log_transition, so a new member gives two INFO
+ * lines.  Other state transitions and MEM_REJECTED are logged only by mem_*
+ * (D18) and are not repeated here.
  */
 static void merge_entries(node_t *n, const msg_t *m)
 {
@@ -83,6 +86,10 @@ void gossip_round(node_t *n)
     n->self.heartbeat++; /* F4 */
     n->self.last_update_ms = now_ms();
 
+    if (k == 0) { /* config_t has no validation of fanout yet: say the real cause */
+        LOG_D("gossip round: fanout is 0, skipping");
+        return;
+    }
     if (k > MAX_NODES) { /* cannot have more candidates than that anyway */
         k = MAX_NODES;
     }
@@ -138,6 +145,19 @@ void gossip_on_message(node_t *n, const msg_t *m, const struct sockaddr_in *from
 }
 
 /* ---- STUBS: replaced by their own issues -------------------------------------------- */
+
+/* STUB until #9: the real function sends one MSG_JOIN (self) to cfg.seed_addr. */
+void gossip_join(node_t *n)
+{
+    (void)n;
+}
+
+/* STUB until #9: the real timer retries gossip_join() up to JOIN_MAX_TRIES times. */
+void gossip_tick_join(node_t *n, uint64_t now)
+{
+    (void)n;
+    (void)now;
+}
 
 /* STUB until #9: the real handler adds the joiner and answers MSG_GOSSIP_REPLY. */
 void gossip_handle_join(node_t *n, const msg_t *m, const struct sockaddr_in *from)
