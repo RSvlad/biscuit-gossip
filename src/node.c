@@ -121,8 +121,9 @@ int node_init(node_t *n, const config_t *cfg, uint32_t id, uint8_t role)
     n->running = true;
     n->frozen = false;
     n->leaving = false;
-    n->joined = false;
+    n->joined = !cfg->has_seed; /* the first node of the network (no seed) is joined at once (#9) */
     n->join_tries = 0;
+    n->exit_code = 0;
     n->next_gossip_at = now + n->cfg.gossip_ms;
     n->next_failure_check_at = now + n->cfg.gossip_ms;
     n->next_join_at = now; /* first JOIN right away, when a seed is configured */
@@ -184,9 +185,10 @@ ssize_t node_send(node_t *n, const struct sockaddr_in *to, uint8_t type, const m
 
 /* ---- timers ------------------------------------------------------------------ */
 
+/* No join_tries limit here: the tick after the last JOIN is the one that gives up (#9). */
 static bool join_active(const node_t *n)
 {
-    return n->cfg.has_seed && !n->joined && n->join_tries < JOIN_MAX_TRIES;
+    return n->cfg.has_seed && !n->joined;
 }
 
 /* Milliseconds until the nearest timer, never negative, at most MAX_POLL_MS. */
@@ -450,13 +452,12 @@ void node_run(node_t *n)
         }
 
         if (join_active(n) && now >= n->next_join_at) {
-            /* STUB until #8: JOIN retries (send MSG_JOIN, join_tries++) are added here.
-             * The deadline still moves so that poll() does not spin. */
-            n->next_join_at = now + JOIN_RETRY_MS;
+            gossip_tick_join(n, now); /* moves next_join_at, so poll() does not spin */
         }
     }
 
-    if (n->leaving) {
+    /* JOIN exhausted (exit_code 3) never sets leaving: we were never in the network. */
+    if (n->leaving && n->exit_code == 0) {
         gossip_leave(n);
     }
 }

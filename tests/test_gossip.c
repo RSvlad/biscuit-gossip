@@ -80,6 +80,20 @@ static void make_node(node_t *n, uint32_t id, uint32_t fanout)
     CHECK(node_init(n, &cfg, id, ROLE_MIXER) == 0);
 }
 
+/* A node started with --seed: node_init sees has_seed, so joined starts false (#9). */
+static void make_joiner(node_t *n, uint32_t id, const struct sockaddr_in *seed)
+{
+    config_t cfg;
+
+    config_defaults(&cfg);
+    cfg.bind_addr.sin_family = AF_INET;
+    cfg.bind_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    cfg.bind_addr.sin_port = 0;
+    cfg.has_seed = true;
+    cfg.seed_addr = *seed;
+    CHECK(node_init(n, &cfg, id, ROLE_MIXER) == 0);
+}
+
 static void add_member(node_t *n, uint32_t id, uint16_t port, uint8_t state)
 {
     member_t m;
@@ -517,8 +531,9 @@ static void test_joined_from_seed_only(void)
     make_node(&n, 100, 3);
     sock_open(&seed);
     sock_open(&other);
-    n.cfg.has_seed = true;
+    n.cfg.has_seed = true; /* set after node_init, so undo its "no seed = joined" (#9) */
     n.cfg.seed_addr = seed.addr;
+    n.joined = false;
 
     member_t e[1] = {entry(7, seed.port, 1)};
     set_msg(&reply, MSG_GOSSIP_REPLY, 7, e, 1);
@@ -539,10 +554,11 @@ static void test_joined_from_seed_only(void)
     gossip_on_message(&n, &reply, &other.addr);
     CHECK(n.joined); /* stays joined */
 
-    static node_t m; /* no seed configured: nobody can set joined */
+    static node_t m; /* no seed configured: the first node of the network is joined at once */
     make_node(&m, 101, 3);
+    CHECK(m.joined);
     gossip_on_message(&m, &reply, &seed.addr);
-    CHECK(!m.joined);
+    CHECK(m.joined);
 
     sock_close(&seed);
     sock_close(&other);
@@ -729,6 +745,304 @@ static void test_three_nodes_converge(void)
         node_shutdown(&ns[i]);
 }
 
+/* ---- JOIN (#9): joiner side ---------------------------------------------------------- */
+
+static size_t drain_count(const sock_t *s, uint8_t type) /* datagrams of `type` queued on s */
+{
+    msg_t m;
+    struct sockaddr_in from;
+    size_t cnt = 0;
+
+    while (recv_msg(s->fd, &m, &from, QUIET_MS))
+        if (m.type == type)
+            cnt++;
+    return cnt;
+}
+
+static void test_join_sends_self_to_seed(void)
+{
+    static node_t n, lone;
+    sock_t seed;
+    msg_t out;
+    struct sockaddr_in from;
+    static char log[8192];
+
+    sock_open(&seed);
+    make_joiner(&n, 100, &seed.addr);
+    CHECK(!n.joined);
+    CHECK_EQ_U64(n.join_tries, 0);
+    CHECK_EQ_U64(n.exit_code, 0);
+
+    cap_begin();
+    gossip_join(&n);
+    cap_end(log, sizeof log);
+
+    CHECK_EQ_U64(n.join_tries, 1);
+    CHECK_EQ_U64(n.stats.sent[MSG_JOIN], 1);
+    CHECK(strstr(log, "join attempt 1/10 to 127.0.0.1:") != NULL);
+    CHECK(recv_msg(seed.fd, &out, &from, WAIT_MS));
+    CHECK(out.type == MSG_JOIN);
+    CHECK_EQ_U64(out.count, 1); /* a single record: self */
+    CHECK_EQ_U64(out.entries[0].node_id, 100);
+    CHECK_EQ_U64(out.entries[0].port, n.self.port);
+    CHECK_EQ_U64(ntohs(from.sin_port), n.self.port);
+    CHECK_EQ_U64(n.count, 0); /* D2: the seed is not written into the table */
+
+    make_node(&lone, 101, 3); /* no seed: gossip_join does nothing */
+    gossip_join(&lone);
+    CHECK_EQ_U64(lone.join_tries, 0);
+    CHECK_EQ_U64(total_sent(&lone), 0);
+
+    sock_close(&seed);
+    node_shutdown(&n);
+    node_shutdown(&lone);
+}
+
+static void test_tick_join_schedule(void)
+{
+    static node_t n, lone;
+    sock_t seed;
+
+    sock_open(&seed);
+    make_joiner(&n, 100, &seed.addr);
+    uint64_t t = n.next_join_at; /* node_init: first JOIN right away */
+
+    gossip_tick_join(&n, t - 1); /* before the deadline: nothing */
+    CHECK_EQ_U64(n.join_tries, 0);
+    gossip_tick_join(&n, t);
+    CHECK_EQ_U64(n.join_tries, 1);
+    CHECK_EQ_U64(n.next_join_at, t + JOIN_RETRY_MS);
+    gossip_tick_join(&n, t + 1); /* the next retry is 2 s later */
+    CHECK_EQ_U64(n.join_tries, 1);
+    CHECK_EQ_U64(drain_count(&seed, MSG_JOIN), 1);
+
+    n.joined = true; /* answered: no more attempts */
+    gossip_tick_join(&n, t + 10 * JOIN_RETRY_MS);
+    CHECK_EQ_U64(n.join_tries, 1);
+    CHECK(silent(&seed));
+
+    make_node(&lone, 101, 3); /* no seed */
+    gossip_tick_join(&lone, lone.next_join_at);
+    CHECK_EQ_U64(lone.join_tries, 0);
+    CHECK_EQ_U64(total_sent(&lone), 0);
+
+    sock_close(&seed);
+    node_shutdown(&n);
+    node_shutdown(&lone);
+}
+
+static void test_tick_join_exhausted(void)
+{
+    static node_t n;
+    sock_t seed; /* never answers */
+    static char log[8192];
+
+    sock_open(&seed);
+    make_joiner(&n, 100, &seed.addr);
+    uint64_t t = n.next_join_at;
+
+    for (uint64_t i = 0; i < JOIN_MAX_TRIES; i++)
+        gossip_tick_join(&n, t + i * JOIN_RETRY_MS);
+    CHECK_EQ_U64(n.join_tries, JOIN_MAX_TRIES);
+    CHECK(n.running); /* the last JOIN still gets its JOIN_RETRY_MS */
+    CHECK_EQ_U64(n.exit_code, 0);
+
+    cap_begin();
+    gossip_tick_join(&n, t + JOIN_MAX_TRIES * JOIN_RETRY_MS);
+    cap_end(log, sizeof log);
+
+    CHECK_EQ_U64(n.join_tries, JOIN_MAX_TRIES); /* no 11th JOIN */
+    CHECK_EQ_U64(n.stats.sent[MSG_JOIN], JOIN_MAX_TRIES);
+    CHECK_EQ_U64(n.exit_code, 3); /* D17 */
+    CHECK(!n.running);
+    CHECK(!n.leaving); /* never in the network: no LEAVE */
+    CHECK(strstr(log, "seed unreachable") != NULL);
+    CHECK_EQ_U64(drain_count(&seed, MSG_JOIN), JOIN_MAX_TRIES);
+
+    sock_close(&seed);
+    node_shutdown(&n);
+}
+
+/* ---- JOIN (#9): seed side ------------------------------------------------------------ */
+
+static void test_handle_join_adds_and_replies(void)
+{
+    static node_t s;
+    sock_t joiner;
+    msg_t join, out;
+    struct sockaddr_in from;
+    static char log[8192];
+
+    make_node(&s, 100, 3);
+    sock_open(&joiner);
+    member_t e[1] = {entry(7, 9, 0)}; /* the record's port (9) is not where the answer goes */
+    set_msg(&join, MSG_JOIN, 7, e, 1);
+
+    cap_begin();
+    gossip_on_message(&s, &join, &joiner.addr);
+    cap_end(log, sizeof log);
+
+    const member_t *m = mem_find(&s, 7);
+    CHECK(m != NULL);
+    if (m != NULL)
+        CHECK(m->state == STATE_ALIVE);
+    CHECK_EQ_U64(count_str(log, "discovered member 7 OVEN at 127.0.0.1:9"), 1);
+    CHECK_EQ_U64(s.stats.sent[MSG_GOSSIP_REPLY], 1);
+    CHECK(recv_msg(joiner.fd, &out, &from, WAIT_MS)); /* D6: answered to `from` */
+    CHECK(out.type == MSG_GOSSIP_REPLY);
+    CHECK(has_id(&out, 100)); /* the seed's own record, so the joiner learns its id (D2) */
+    CHECK(has_id(&out, 7));
+
+    sock_close(&joiner);
+    node_shutdown(&s);
+}
+
+static void test_handle_join_repeated(void)
+{
+    static node_t s;
+    sock_t joiner;
+    msg_t join;
+    static char log[8192];
+
+    make_node(&s, 100, 3);
+    sock_open(&joiner);
+    member_t e[1] = {entry(7, joiner.port, 0)};
+    set_msg(&join, MSG_JOIN, 7, e, 1);
+
+    cap_begin();
+    gossip_on_message(&s, &join, &joiner.addr); /* answer lost, joiner retries */
+    gossip_on_message(&s, &join, &joiner.addr);
+    cap_end(log, sizeof log);
+
+    CHECK_EQ_U64(s.count, 1); /* idempotent */
+    CHECK_EQ_U64(count_str(log, "discovered member"), 1);
+    CHECK_EQ_U64(count_str(log, "id conflict"), 0);
+    CHECK_EQ_U64(s.stats.sent[MSG_GOSSIP_REPLY], 2); /* every JOIN gets its answer */
+    CHECK_EQ_U64(drain_count(&joiner, MSG_GOSSIP_REPLY), 2);
+
+    sock_close(&joiner);
+    node_shutdown(&s);
+}
+
+static void test_handle_join_table_full(void)
+{
+    static node_t s;
+    sock_t joiner;
+    msg_t join;
+
+    make_node(&s, 100, 3);
+    sock_open(&joiner);
+    for (uint32_t id = 1; id <= CAP; id++)
+        add_member(&s, id, 9, STATE_ALIVE);
+    member_t e[1] = {entry(5000, joiner.port, 0)};
+    set_msg(&join, MSG_JOIN, 5000, e, 1);
+
+    gossip_on_message(&s, &join, &joiner.addr);
+
+    CHECK(mem_find(&s, 5000) == NULL); /* MEM_REJECTED ... */
+    CHECK_EQ_U64(s.stats.sent[MSG_GOSSIP_REPLY], 1); /* ... and still answered */
+    CHECK_EQ_U64(drain_count(&joiner, MSG_GOSSIP_REPLY), 1);
+
+    sock_close(&joiner);
+    node_shutdown(&s);
+}
+
+static void test_handle_join_id_conflict(void)
+{
+    static node_t s;
+    sock_t joiner;
+    msg_t join;
+    static char log[8192];
+
+    make_node(&s, 100, 3);
+    sock_open(&joiner);
+    add_member(&s, 7, 9, STATE_ALIVE); /* incarnation 1 at port 9 */
+
+    member_t same[1] = {entry(7, 10, 0)}; /* other port, same incarnation */
+    member_t newer[1] = {entry(7, 10, 0)};
+    newer[0].incarnation = 2; /* a restart, not a conflict */
+
+    cap_begin();
+    set_msg(&join, MSG_JOIN, 7, same, 1);
+    gossip_on_message(&s, &join, &joiner.addr);
+    cap_end(log, sizeof log);
+
+    CHECK_EQ_U64(count_str(log, "id conflict: member 7 is at 127.0.0.1:9, JOIN from 127.0.0.1:10"),
+                 1);
+    const member_t *m = mem_find(&s, 7);
+    CHECK(m != NULL);
+    if (m != NULL)
+        CHECK_EQ_U64(m->port, 9); /* not fatal, the table is unchanged */
+    CHECK_EQ_U64(s.stats.sent[MSG_GOSSIP_REPLY], 1);
+
+    cap_begin();
+    set_msg(&join, MSG_JOIN, 7, newer, 1);
+    gossip_on_message(&s, &join, &joiner.addr);
+    cap_end(log, sizeof log);
+
+    CHECK_EQ_U64(count_str(log, "id conflict"), 0);
+    CHECK_EQ_U64(s.stats.sent[MSG_GOSSIP_REPLY], 2);
+    CHECK_EQ_U64(drain_count(&joiner, MSG_GOSSIP_REPLY), 2);
+
+    sock_close(&joiner);
+    node_shutdown(&s);
+}
+
+static void test_handle_join_bad_count(void)
+{
+    static node_t s;
+    sock_t joiner;
+    msg_t join;
+
+    make_node(&s, 100, 3);
+    sock_open(&joiner);
+    member_t e[2] = {entry(7, joiner.port, 0), entry(8, joiner.port, 0)};
+
+    set_msg(&join, MSG_JOIN, 7, e, 2); /* a JOIN carries exactly one record */
+    gossip_on_message(&s, &join, &joiner.addr);
+    set_msg(&join, MSG_JOIN, 7, e, 0);
+    gossip_on_message(&s, &join, &joiner.addr);
+
+    CHECK_EQ_U64(s.count, 0);
+    CHECK_EQ_U64(total_sent(&s), 0);
+    CHECK(silent(&joiner));
+
+    sock_close(&joiner);
+    node_shutdown(&s);
+}
+
+/* ---- JOIN (#9): seed and joiner, real sockets -------------------------------------------- */
+
+static void test_join_end_to_end(void)
+{
+    static node_t seed, j;
+    msg_t m;
+    struct sockaddr_in from;
+
+    make_node(&seed, 1, 3);
+    make_joiner(&j, 2, &seed.cfg.bind_addr);
+
+    gossip_tick_join(&j, j.next_join_at); /* MSG_JOIN -> seed */
+    CHECK(recv_msg(seed.fd, &m, &from, WAIT_MS));
+    CHECK(m.type == MSG_JOIN);
+    gossip_on_message(&seed, &m, &from); /* seed adds 2, answers to `from` */
+    CHECK(recv_msg(j.fd, &m, &from, WAIT_MS));
+    CHECK(m.type == MSG_GOSSIP_REPLY);
+    gossip_on_message(&j, &m, &from);
+
+    CHECK(j.joined);
+    CHECK(mem_find(&j, 1) != NULL);    /* the seed arrived through the reply (D2) */
+    CHECK(mem_find(&seed, 2) != NULL); /* and the seed knows the joiner */
+
+    gossip_tick_join(&j, j.next_join_at); /* joined: no more JOINs */
+    CHECK_EQ_U64(j.join_tries, 1);
+    CHECK_EQ_U64(j.exit_code, 0);
+    CHECK(j.running);
+
+    node_shutdown(&seed);
+    node_shutdown(&j);
+}
+
 int main(void)
 {
     log_init(LOG_WARN, 0); /* node_init and mem_* log at INFO; cap_begin raises it where needed */
@@ -750,6 +1064,15 @@ int main(void)
     test_table_full_rejected();
     test_discovered_member_log();
     test_three_nodes_converge();
+    test_join_sends_self_to_seed();
+    test_tick_join_schedule();
+    test_tick_join_exhausted();
+    test_handle_join_adds_and_replies();
+    test_handle_join_repeated();
+    test_handle_join_table_full();
+    test_handle_join_id_conflict();
+    test_handle_join_bad_count();
+    test_join_end_to_end();
 
     TEST_MAIN_END();
 }

@@ -131,6 +131,8 @@ typedef struct {
     bool leaving;                  /* `leave` or SIGINT/SIGTERM: send LEAVE, then exit (D13) */
     bool joined;                   /* JOIN answered (a GOSSIP_REPLY from the seed arrived) */
     unsigned join_tries;           /* JOIN datagrams sent so far (max JOIN_MAX_TRIES) */
+    int exit_code;                 /* process exit status (D17): 0 normally, 3 when JOIN is
+                                      exhausted (#9); #36 adds 1 for loop errors */
 
     uint64_t next_gossip_at;        /* monotonic ms (D11) */
     uint64_t next_failure_check_at; /* monotonic ms */

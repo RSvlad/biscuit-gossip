@@ -19,7 +19,8 @@
  * Prepares *n (zeroed first): self (id, role, bind address as ip/port,
  * STATE_ALIVE, heartbeat 0, incarnation = (uint32_t)time(NULL), D5), mem_init,
  * net_open on cfg->bind_addr, next_gossip_at = now + gossip_ms,
- * next_failure_check_at = now + gossip_ms, running = true.
+ * next_failure_check_at = now + gossip_ms, running = true, joined = !has_seed,
+ * join_tries = 0, next_join_at = now, exit_code = 0.
  * If the bind port is 0 (tests), the port chosen by the kernel is stored in
  * self.port and cfg.bind_addr.  Returns 0, or -1 (reason logged at ERROR; the
  * socket is not left open).
@@ -27,10 +28,11 @@
 int node_init(node_t *n, const config_t *cfg, uint32_t id, uint8_t role);
 
 /*
- * Runs the loop until n->running is false (`quit`, `leave`, SIGINT/SIGTERM).
+ * Runs the loop until n->running is false (`quit`, `leave`, SIGINT/SIGTERM,
+ * or JOIN exhausted: gossip_tick_join sets exit_code = 3).
  * Installs the signal handlers (sigaction): SIGINT/SIGTERM request an orderly
- * leave, SIGPIPE is ignored.  If n->leaving is set on exit, gossip_leave() is
- * called once before returning.
+ * leave, SIGPIPE is ignored.  If n->leaving is set on exit (and exit_code is 0),
+ * gossip_leave() is called once before returning.  main returns n->exit_code.
  */
 void node_run(node_t *n);
 
